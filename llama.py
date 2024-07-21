@@ -4,6 +4,8 @@ import time
 import numpy as np
 import torch
 import torch.nn as nn
+import scipy
+from scipy import stats
 #import quant
 
 #from gptq import GPTQ, Observer
@@ -260,6 +262,17 @@ def llama_eval(model, testenc, dev):
     ppl = torch.exp(torch.stack(nlls).sum() / (nsamples * model.seqlen))
     print(ppl.item())
     
+     # Calculate confidence interval
+    nlls = torch.tensor(nlls)
+    mean_nll = nlls.mean().item()
+    std_nll = nlls.std().item()
+    confidence_level = 0.95
+    degrees_freedom = nsamples - 1
+    confidence_interval = stats.t.interval(confidence_level, degrees_freedom, mean_nll, std_nll / np.sqrt(nsamples))
+    lower_bound = torch.exp(torch.tensor(confidence_interval[0]) / model.seqlen).item()
+    upper_bound = torch.exp(torch.tensor(confidence_interval[1]) / model.seqlen).item()
+    print(f"95% Confidence Interval for Perplexity: [{lower_bound}, {upper_bound}]")
+
     model.config.use_cache = use_cache
 
 
