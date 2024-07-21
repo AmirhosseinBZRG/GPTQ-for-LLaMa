@@ -505,9 +505,7 @@ if __name__ == '__main__':
             benchmark(model, input_ids, check=args.check)
 
     if args.eval:
-        datasets = ['wikitext2', 'ptb', 'c4']
-        if args.new_eval:
-            datasets = ['wikitext2', 'ptb-new', 'c4-new']
+        datasets = ['wikitext2', 'hellaswag']
         for dataset in datasets:
             dataloader, testloader = get_loaders(dataset, seed=args.seed, model=args.model, seqlen=model.seqlen)
             print(dataset)
