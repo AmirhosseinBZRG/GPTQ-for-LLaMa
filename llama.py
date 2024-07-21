@@ -259,7 +259,7 @@ def llama_eval(model, testenc, dev):
         nlls.append(neg_log_likelihood)
     ppl = torch.exp(torch.stack(nlls).sum() / (nsamples * model.seqlen))
     print(ppl.item())
-
+    
     model.config.use_cache = use_cache
 
 
