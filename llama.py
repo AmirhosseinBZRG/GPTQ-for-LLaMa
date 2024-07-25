@@ -6,6 +6,8 @@ import torch
 import torch.nn as nn
 import scipy
 from scipy import stats
+from torch.profiler import profile, record_function, ProfilerActivity
+
 #import quant
 
 #from gptq import GPTQ, Observer
@@ -221,26 +223,35 @@ def llama_eval(model, testenc, dev):
     outs = torch.zeros_like(inps)
     attention_mask = cache['attention_mask']
     position_ids = cache['position_ids']
+    with profile(activities=[ProfilerActivity.CUDA,ProfilerActivity.CPU],
+         record_shapes=True,
+         profile_memory=True, with_stack=True) as prof:
+      with record_function("model_inference"):
 
-    for i in range(len(layers)):
-        print(i)
-        layer = layers[i].to(dev)
+          for i in range(len(layers)):
+              print(i)
+              layer = layers[i].to(dev)
 
-        if args.nearest:
-            subset = find_layers(layer)
-            for name in subset:
-                quantizer = quant.Quantizer()
-                quantizer.configure(args.wbits, perchannel=True, sym=args.sym, mse=False)
-                W = subset[name].weight.data
-                quantizer.find_params(W, weight=True)
-                subset[name].weight.data = quantizer.quantize(W).to(next(iter(layer.parameters())).dtype)
+              if args.nearest:
+                  subset = find_layers(layer)
+                  for name in subset:
+                      quantizer = quant.Quantizer()
+                      quantizer.configure(args.wbits, perchannel=True, sym=args.sym, mse=False)
+                      W = subset[name].weight.data
+                      quantizer.find_params(W, weight=True)
+                      subset[name].weight.data = quantizer.quantize(W).to(next(iter(layer.parameters())).dtype)
 
-        for j in range(nsamples):
-            outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0]
-        layers[i] = layer.cpu()
-        del layer
-        torch.cuda.empty_cache()
-        inps, outs = outs, inps
+              for j in range(nsamples):
+                  outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0]
+              layers[i] = layer.cpu()
+              del layer
+              torch.cuda.empty_cache()
+              inps, outs = outs, inps
+    #print profiler results
+    print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=10))
+
+    # Export chrome trace
+    prof.export_chrome_trace("/content/llama_eval_trace.json")
 
     if model.model.norm is not None:
         model.model.norm = model.model.norm.to(dev)
