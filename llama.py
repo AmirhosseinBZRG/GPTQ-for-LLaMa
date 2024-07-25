@@ -177,8 +177,8 @@ def llama_sequential(model, dataloader, dev):
 @torch.no_grad()
 def llama_eval(model, testenc, dev):
     print('Evaluating ...')
-
-    testenc = testenc.input_ids
+    model = model.to(dev)
+    testenc = testenc.input_ids.to(dev)
     nsamples = testenc.numel() // model.seqlen
 
     use_cache = model.config.use_cache
@@ -507,15 +507,16 @@ if __name__ == '__main__':
         quantizers = llama_sequential(model, dataloader, DEV)
         print(time.time() - tick)
 
-    if args.benchmark:
-        gpus = [torch.device('cuda:%d' % i) for i in range(torch.cuda.device_count())]
-        if len(gpus) > 1:
-            llama_multigpu(model, gpus, gpu_dist)
-        else:
-            model = model.to(DEV)
-        if args.benchmark:
-            input_ids = next(iter(dataloader))[0][:, :args.benchmark]
-            benchmark(model, input_ids, check=args.check)
+    #if args.benchmark:
+        #gpus = [torch.device('cuda:%d' % i) for i in range(torch.cuda.device_count())]
+        #if len(gpus) > 1:
+            #llama_multigpu(model, gpus, gpu_dist)
+        #else:
+            #model = model.to(DEV)
+        #if args.benchmark:
+            
+          #input_ids = next(iter(dataloader))[0][:, :args.benchmark]
+          #benchmark(model, input_ids, check=args.check)
 
     if args.eval:
         datasets = ['wikitext2', 'hellaswag']
