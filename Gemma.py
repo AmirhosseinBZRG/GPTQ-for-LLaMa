@@ -16,8 +16,6 @@ from transformers import LlamaForCausalLM
 from transformers import AutoModelForCausalLM
 
 def get_llama(model_name):
-    # Login to Hugging Face Hub using an environment variable for security
-    huggingface_hub.login(os.getenv("HUGGINGFACE_TOKEN"))
     
     def skip(*args, **kwargs):
         pass
