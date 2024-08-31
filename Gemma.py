@@ -16,7 +16,8 @@ from transformers import LlamaForCausalLM
 from transformers import AutoModelForCausalLM
 
 def get_llama(model_name):
-    
+    huggingface_hub.login("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")
+    access_token = "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"
     def skip(*args, **kwargs):
         pass
 
