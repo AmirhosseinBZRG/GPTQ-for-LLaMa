@@ -25,8 +25,8 @@ def get_llama(model):
     torch.nn.init.uniform_ = skip
     torch.nn.init.normal_ = skip
     
-    # Load the Llama model with float16 precision
-    model = LlamaForCausalLM.from_pretrained(model, torch_dtype=torch.float16)
+    # Load the Llama model with float16 precision and ignore mismatched sizes
+    model = LlamaForCausalLM.from_pretrained(model, torch_dtype=torch.float16, ignore_mismatched_sizes=True)
     model.seqlen = 2048  # Set the sequence length
     return model
 
