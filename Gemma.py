@@ -13,9 +13,11 @@ from utils import find_layers, DEV, set_seed, get_wikitext2, get_loaders, export
 from texttable import Texttable
 from transformers import LlamaForCausalLM
 
-def get_llama(model):
-    # Login to Hugging Face Hub
-    huggingface_hub.login("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")
+from transformers import AutoModelForCausalLM
+
+def get_llama(model_name):
+    # Login to Hugging Face Hub using an environment variable for security
+    huggingface_hub.login(os.getenv("HUGGINGFACE_TOKEN"))
     
     def skip(*args, **kwargs):
         pass
@@ -25,9 +27,14 @@ def get_llama(model):
     torch.nn.init.uniform_ = skip
     torch.nn.init.normal_ = skip
     
-    # Load the Llama model with float16 precision and ignore mismatched sizes
-    model = LlamaForCausalLM.from_pretrained(model, torch_dtype=torch.float16, ignore_mismatched_sizes=True)
-    model.seqlen = 2048  # Set the sequence length
+    try:
+        # Load the Llama model with float16 precision using AutoModelForCausalLM
+        model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.float16, ignore_mismatched_sizes=True)
+        model.seqlen = 2048  # Set the sequence length
+    except Exception as e:
+        print(f"Error loading model: {e}")
+        return None  # or handle as appropriate
+
     return model
 
 @torch.no_grad()
