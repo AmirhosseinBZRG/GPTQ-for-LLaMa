@@ -32,104 +32,24 @@ def get_gpt2(model_name):
         return None  # or handle as appropriate
     return model
 
-@torch.no_grad()
-def gpt2_sequential(model, dataloader, dev):
-    print('Starting ...')
-    use_cache = model.config.use_cache
-    model.config.use_cache = False
-    layers = model.transformer.h  # Access GPT-2 layers
-    model.transformer.wte = model.transformer.wte.to(dev)  # Move embedding to device
-    model.transformer.ln_f = model.transformer.ln_f.to(dev)  # Move final layer norm to device
-    dtype = next(iter(model.parameters())).dtype
-    inps = torch.zeros((args.nsamples, model.seqlen, model.config.n_embd), dtype=dtype, device=dev)  # Adjust for GPT-2 embedding size
-    cache = {'i': 0, 'attention_mask': None}
-
-    class Catcher(nn.Module):
-        def __init__(self, module):
-            super().__init__()
-            self.module = module
-
-        def forward(self, inp, **kwargs):
-            inps[cache['i']] = inp
-            cache['i'] += 1
-            cache['attention_mask'] = kwargs['attention_mask']
-            raise ValueError
-
-    layers[0] = Catcher(layers[0])  # Wrap the first layer
-    for batch in dataloader:
-        try:
-            model(batch[0].to(dev))
-        except ValueError:
-            pass
-
-    layers[0] = layers[0].module
-    model.transformer.wte = model.transformer.wte.cpu()
-    model.transformer.ln_f = model.transformer.ln_f.cpu()
-    torch.cuda.empty_cache()
-    outs = torch.zeros_like(inps)
-    attention_mask = cache['attention_mask']
-    
-    print('Ready.')
-    quantizers = {}
-    observer = Observer()  # Ensure Observer is defined or imported appropriately
-
-    for i in range(len(layers)):
-        print(f'Quantizing layer {i + 1}/{len(layers)}..')
-        layer = layers[i].to(dev)
-        full = find_layers(layer)
-
-        # Define sequential processing based on true_sequential flag
-        if args.true_sequential:
-            sequential = [['attn.c_attn', 'attn.c_proj'], ['mlp.c_fc', 'mlp.c_proj']]
-        else:
-            sequential = [list(full.keys())]
-
-        for names in sequential:
-            subset = {n: full[n] for n in names}
-            gptq = {}
-            for name in subset:
-                gptq[name] = GPTQ(subset[name], observe=args.observe)
-                gptq[name].quantizer.configure(args.wbits, perchannel=True, sym=args.sym, mse=False)
-
-            # Add batch processing
-            def add_batch(name):
-                def tmp(_, inp, out):
-                    gptq[name].add_batch(inp[0].data, out.data)
-                return tmp
-
-            handles = []
-            for name in subset:
-                handles.append(subset[name].register_forward_hook(add_batch(name)))
-
-            for j in range(args.nsamples):
-                outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask)[0]
-
-            for h in handles:
-                h.remove()
-
-            for name in subset:
-                scale, zero, g_idx, error = gptq[name].fasterquant(
-                    percdamp=args.percdamp, groupsize=args.groupsize, actorder=args.act_order, name=name)
-                quantizers['model.layers.%d.%s' % (i, name)] = (gptq[name].quantizer.cpu(), scale.cpu(), zero.cpu(), g_idx.cpu(), args.wbits, args.groupsize)
-
-    model.config.use_cache = use_cache
-    return quantizers
 
 @torch.no_grad()
 def gpt2_eval(model, testenc, dev):
     print('Evaluating ...')
     model = model.to(dev)
     testenc = testenc.input_ids.to(dev)
-    nsamples = testenc.numel() // model.seqlen
+    nsamples = testenc.numel() // model.config.n_positions  # Use n_positions instead of seqlen
+
     use_cache = model.config.use_cache
     model.config.use_cache = False
-    layers = model.transformer.h
+    layers = model.transformer.h  # Access the transformer layers
 
-    model.transformer.wte = model.transformer.wte.to(dev)
-    layers[0] = layers[0].to(dev)
+    model.transformer.wte = model.transformer.wte.to(dev)  # Move embedding to device
+    layers[0] = layers[0].to(dev)  # Move the first layer to device
+
     dtype = next(iter(model.parameters())).dtype
-    inps = torch.zeros((nsamples, model.seqlen, model.config.n_embd), dtype=dtype, device=dev)
-    cache = {'i': 0, 'attention_mask': None}
+    inps = torch.zeros((nsamples, model.config.n_positions, model.config.hidden_size), dtype=dtype, device=dev)
+    cache = {'i': 0, 'attention_mask': None, 'position_ids': None}
 
     class Catcher(nn.Module):
         def __init__(self, module):
@@ -140,29 +60,39 @@ def gpt2_eval(model, testenc, dev):
             inps[cache['i']] = inp
             cache['i'] += 1
             cache['attention_mask'] = kwargs['attention_mask']
+            cache['position_ids'] = kwargs['position_ids']
             raise ValueError
 
-    layers[0] = Catcher(layers[0])
+    layers[0] = Catcher(layers[0])  # Wrap the first layer
     for i in range(nsamples):
-        batch = testenc[:, (i * model.seqlen):((i + 1) * model.seqlen)].to(dev)
+        batch = testenc[:, (i * model.config.n_positions):((i + 1) * model.config.n_positions)].to(dev)
         try:
-            model(batch)
+            model(batch)  # Forward pass
         except ValueError:
             pass
-
     layers[0] = layers[0].module
+
+    layers[0] = layers[0].cpu()
     model.transformer.wte = model.transformer.wte.cpu()
     torch.cuda.empty_cache()
+
     outs = torch.zeros_like(inps)
     attention_mask = cache['attention_mask']
-
-    # Profiling setup
-    with profile(activities=[ProfilerActivity.CUDA, ProfilerActivity.CPU], record_shapes=True, profile_memory=True, with_stack=True) as prof:
+    position_ids = cache['position_ids']
+    
+    with profile(activities=[ProfilerActivity.CUDA, ProfilerActivity.CPU],
+         record_shapes=True,
+         profile_memory=True, with_stack=True) as prof:
         with record_function("model_inference"):
             for i in range(len(layers)):
+                print(i)
                 layer = layers[i].to(dev)
+
+                # Quantization logic can be added here if needed
+                # Example: if args.nearest: ...
+
                 for j in range(nsamples):
-                    outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask)[0]
+                    outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0]
                 layers[i] = layer.cpu()
                 del layer
                 torch.cuda.empty_cache()
@@ -175,32 +105,30 @@ def gpt2_eval(model, testenc, dev):
     nlls = []
     for i in range(nsamples):
         hidden_states = inps[i].unsqueeze(0)
-        lm_logits = model(hidden_states).logits
+        lm_logits = model(hidden_states)  # Get logits directly from the model
         shift_logits = lm_logits[:, :-1, :].contiguous()
-        shift_labels = testenc[:, (i * model.seqlen):((i + 1) * model.seqlen)][:, 1:]
+        shift_labels = testenc[:, (i * model.config.n_positions):((i + 1) * model.config.n_positions)][:, 1:]
         loss_fct = nn.CrossEntropyLoss()
         loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
-        neg_log_likelihood = loss.float() * model.seqlen
+        neg_log_likelihood = loss.float() * model.config.n_positions
         nlls.append(neg_log_likelihood)
 
     # Calculate perplexity
-    ppl = torch.exp(torch.stack(nlls).sum() / (nsamples * model.seqlen))
+    ppl = torch.exp(torch.stack(nlls).sum() / (nsamples * model.config.n_positions))
     print(ppl.item())
 
+    # Calculate confidence interval
+    nlls = torch.tensor(nlls)
+    mean_nll = nlls.mean().item()
+    std_nll = nlls.std().item()
+    confidence_level = 0.95
+    degrees_freedom = nsamples - 1
+    confidence_interval = stats.t.interval(confidence_level, degrees_freedom, mean_nll, std_nll / np.sqrt(nsamples))
+    lower_bound = torch.exp(torch.tensor(confidence_interval[0]) / model.config.n_positions).item()
+    upper_bound = torch.exp(torch.tensor(confidence_interval[1]) / model.config.n_positions).item()
+    print(f"95% Confidence Interval for Perplexity: [{lower_bound}, {upper_bound}]")
+
     model.config.use_cache = use_cache
-    return ppl
-def gpt2_pack(model, quantizers, wbits, groupsize):
-    layers = find_layers(model)
-    layers = {n: layers[n] for n in quantizers}
-    quant.make_quant_linear(model, quantizers, wbits, groupsize)
-    qlayers = find_layers(model, [quant.QuantLinear])
-    print('Packing ...')
-    for name in qlayers:
-        print(name)
-        quantizers[name], scale, zero, g_idx, _, _ = quantizers[name]
-        qlayers[name].pack(layers[name], scale, zero, g_idx)
-    print('Done.')
-    return model
 
 
 
@@ -257,7 +185,7 @@ def gpt2_multigpu(model, gpus, gpu_dist):
 if __name__ == '__main__':
     import argparse
     import torch
-    from transformers import GPT2LMHeadModel, GPT2Tokenizer
+    from transformers import AutoModelForCausalLM, GPT2Tokenizer
 
     parser = argparse.ArgumentParser()
 
@@ -297,28 +225,12 @@ if __name__ == '__main__':
     if args.load:
         model = load_quant(args.model, args.load, args.wbits, args.groupsize)
     else:
-        model = GPT2LMHeadModel.from_pretrained(args.model)
+        model = AutoModelForCausalLM.from_pretrained(args.model)
         model.eval()
 
-    # Load data
+  
     dataloader, testloader = get_loaders(args.dataset, nsamples=args.nsamples, seed=args.seed, model=args.model, seqlen=model.config.n_positions)
 
-    # Perform sequential quantization if applicable
-    if not args.load and args.wbits < 16 and not args.nearest:
-        tick = time.time()
-        quantizers = gpt2_sequential(model, dataloader, DEV)
-        print(f"Quantization time: {time.time() - tick:.2f} seconds")
-
-    # Benchmarking
-    if args.benchmark:
-        gpus = [torch.device(f'cuda:{i}') for i in range(torch.cuda.device_count())]
-        if len(gpus) > 1:
-            gpt2_multigpu(model, gpus, gpu_dist)
-        else:
-            model = model.to(DEV)
-
-        input_ids = next(iter(dataloader))[0][:, :args.benchmark]
-        benchmark(model, input_ids, check=args.check)
 
     # Evaluation
     if args.eval:
@@ -341,20 +253,5 @@ if __name__ == '__main__':
         with torch.no_grad():
             generated_ids = model.generate(input_ids)
 
-    # Export quantization parameters if specified
-    if args.quant_directory is not None:
-        export_quant_table(quantizers, args.quant_directory)
-
-    # Save model if specified
-    if not args.observe and args.save:
-        gpt2_pack(model, quantizers, args.wbits, args.groupsize)
-        torch.save(model.state_dict(), args.save)
-
-    if not args.observe and args.save_safetensors:
-        gpt2_pack(model, quantizers, args.wbits, args.groupsize)
-        from safetensors.torch import save_file as safe_save
-        state_dict = model.state_dict()
-        state_dict = {k: v.clone().contiguous() for k, v in state_dict.items()}
-        safe_save(state_dict, args.save_safetensors)
 
 
